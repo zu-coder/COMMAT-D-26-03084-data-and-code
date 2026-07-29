@@ -1,0 +1,61 @@
+units metal
+dimension 3 
+atom_style atomic 
+boundary p p p
+neighbor 3 bin
+neigh_modify every 20 delay 0 check yes 
+timestep 0.001
+
+read_data s300.data extra/atom/types 2
+read_data d1825k.data add append offset 1 0 0 0 0 shift 0 0 70
+
+change_box all z delta 0 10 units box
+write_data sys.data 
+
+#分组
+group sub type 1 
+group drop type 2 3 
+group fe type 2
+group si type 3
+region f block INF INF INF INF INF 2 units box 
+region t block INF INF INF INF 2.1 10 units box
+group f region f 
+group t region t 
+group n subtract sub f t 
+group s_up subtract sub f 
+group system subtract all f
+
+
+pair_style  meam 
+pair_coeff      * * Jelinek_2012_meamf Al Si Mg Cu Fe Jelinek_2012_meam.alsimgcufe Fe Fe Si 
+
+
+#计算温度
+compute d_t drop temp
+compute t_t t temp 
+compute n_t n temp 
+#计算基底温度分布云图
+compute t all ave/sphere/atom
+
+velocity drop create 1825 67463 loop local rot no mom yes dist gaussian 
+velocity s_up create 300 8743 loop local rot no mom yes dist gaussian 
+
+thermo 100 
+thermo_style custom step temp press pe ke etotal c_d_t c_t_t c_n_t 
+thermo_modify flush yes 
+dump 1 all custom 100 relax300_1825k.lammpstrj id type x y z vx vy vz c_t[2]
+fix 1 n nve 
+fix 2 t nvt temp 300 300 0.1 
+fix_modify 2 temp t_t 
+fix 3 drop nvt temp 1825 1825 0.1  
+fix_modify 3 temp d_t 
+run 50000
+unfix 1 
+unfix 2 
+unfix 3 
+undump 1 
+reset_timestep 0 
+
+write_data relax300_1825.data 
+write_restart relax300_1825.restart
+
