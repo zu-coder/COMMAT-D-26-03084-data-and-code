@@ -1,0 +1,517 @@
+# Fe-3Si，2025K-1825K粘度计算
+echo              screen
+units             metal
+dimension           3
+boundary          p p p
+atom_style        atomic
+neighbor        2.0 bin
+neigh_modify    delay 0 every 3 check yes 
+
+#建立文件夹
+shell mkdir trajectory txt restart
+
+# 定义几个参数 
+variable    T  equal 2025                              # 最高粘度计算温度（各温度仍由 fix 命令直接指定）
+variable    A  equal 2.86                              # 晶格常数大概为 2.86 埃
+variable    DT equal 0.001                             # 积分步长为 1 fs
+
+#建模
+lattice       bcc 2.86
+region        box block 0 20 0 20 0 20 
+create_box    	2 box
+create_atoms  	 1 box
+
+#将原子类型为1的Fe原子替换为Si原子
+set    type 1 type/ratio 2 0.0579 78648
+
+#设置原子类型
+mass    1 56 #Fe
+mass    2 28 #Si
+
+#分组，方便后面的计算
+group Fe type 1
+group Si type 2
+
+#力场设置
+pair_style meam 
+pair_coeff * * Jelinek_2012_meamf Al Si Mg Cu Fe Jelinek_2012_meam.alsimgcufe Fe Si
+
+#输出模型
+write_data Fe-3Si.data
+
+#能量最小化和速度初始化
+min_style cg
+minimize  1e-15 1e-15 10000 10000
+
+#Initiate temperature
+velocity all create 300 89895 rot yes dist gaussian
+
+#输出体系
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol 
+reset_timestep 0 
+
+# 300-2500K，1000K/ns
+fix 1 all npt temp 300 2500 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/heat_300_2500.xyz id type x y z 
+run 2200000
+undump 1
+unfix 1
+reset_timestep 0
+
+#2500K,0.3ns
+fix 1 all npt temp 2500 2500 0.1 iso 1.0 1.0 1.0 
+dump 1 all custom 1000 trajectory/keep_2500_2500.xyz id type x y z 
+run 300000
+undump 1
+unfix 1
+reset_timestep 0
+
+# ============================================================
+# 粘度计算通用参数（只定义一次）
+# ============================================================
+variable dt equal 0.001
+variable KB equal 8.625e-5
+variable bars2Pa equal 1e5
+variable A2m equal 1.0e-10
+variable ps2s equal 1.0e-12
+variable ev2J equal 96438.5/6.02214e23
+variable g_mol2kg equal 1.0e-3/6.02214e23
+variable convert_eta equal ${g_mol2kg}/${ps2s}/${A2m}
+
+# 排除 x、z 方向速度分量后计算温度，避免剪切流速度干扰温控
+compute mytemp all temp/partial 0 1 0
+
+# 2500-2025K，500K/ns
+fix 1 all npt temp 2500 2025 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol
+dump 1 all custom 1000 trajectory/cool_2500_2025.xyz id type x y z
+run 950000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 2025K，NPT平衡0.5ns
+fix 1 all npt temp 2025 2025 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_2025_2025.xyz id type x y z
+run 500000
+unfix 1
+undump 1
+
+# 2025K，Müller-Plathe反向非平衡分子动力学粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 2025 2025 0.1
+fix_modify fxnvt temp mytemp
+
+# 每1步交换一次x方向动量，动量沿z方向传递；z方向划分为20层
+fix MP_v all viscosity 1 x z 20
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_2025K.txt
+
+# 前200000步建立稳定速度梯度
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx
+thermo_modify temp mytemp
+run 200000
+unfix MP_v
+
+# 后200000步采集动量通量并计算粘度，单位为Pa·s
+fix MP_v all viscosity 1 x z 20
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run 200000
+
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 2025-2000K，500K/ns
+fix 1 all npt temp 2025 2000 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol
+dump 1 all custom 1000 trajectory/cool_2025_2000.xyz id type x y z
+run 50000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 2000K，NPT平衡0.5ns
+fix 1 all npt temp 2000 2000 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_2000_2000.xyz id type x y z
+run 500000
+unfix 1
+undump 1
+
+# 2000K，Müller-Plathe反向非平衡分子动力学粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 2000 2000 0.1
+fix_modify fxnvt temp mytemp
+
+# 每1步交换一次x方向动量，动量沿z方向传递；z方向划分为20层
+fix MP_v all viscosity 1 x z 20
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_2000K.txt
+
+# 前200000步建立稳定速度梯度
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx
+thermo_modify temp mytemp
+run 200000
+unfix MP_v
+
+# 后200000步采集动量通量并计算粘度，单位为Pa·s
+fix MP_v all viscosity 1 x z 20
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run 200000
+
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 2000-1975K，500K/ns
+fix 1 all npt temp 2000 1975 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol
+dump 1 all custom 1000 trajectory/cool_2000_1975.xyz id type x y z
+run 50000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1975K，NPT平衡0.5ns
+fix 1 all npt temp 1975 1975 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1975_1975.xyz id type x y z
+run 500000
+unfix 1
+undump 1
+
+# 1975K，Müller-Plathe反向非平衡分子动力学粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1975 1975 0.1
+fix_modify fxnvt temp mytemp
+
+# 每1步交换一次x方向动量，动量沿z方向传递；z方向划分为20层
+fix MP_v all viscosity 1 x z 20
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1975K.txt
+
+# 前200000步建立稳定速度梯度
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx
+thermo_modify temp mytemp
+run 200000
+unfix MP_v
+
+# 后200000步采集动量通量并计算粘度，单位为Pa·s
+fix MP_v all viscosity 1 x z 20
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run 200000
+
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 1975-1950K，500K/ns
+fix 1 all npt temp 1975 1950 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol
+dump 1 all custom 1000 trajectory/cool_1975_1950.xyz id type x y z
+run 50000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1950K，NPT平衡0.5ns
+fix 1 all npt temp 1950 1950 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1950_1950.xyz id type x y z
+run 500000
+unfix 1
+undump 1
+
+# 1950K，Müller-Plathe反向非平衡分子动力学粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1950 1950 0.1
+fix_modify fxnvt temp mytemp
+
+# 每1步交换一次x方向动量，动量沿z方向传递；z方向划分为20层
+fix MP_v all viscosity 1 x z 20
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1950K.txt
+
+# 前200000步建立稳定速度梯度
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx
+thermo_modify temp mytemp
+run 200000
+unfix MP_v
+
+# 后200000步采集动量通量并计算粘度，单位为Pa·s
+fix MP_v all viscosity 1 x z 20
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run 200000
+
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 1950-1925K，500K/ns
+fix 1 all npt temp 1950 1925 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol
+dump 1 all custom 1000 trajectory/cool_1950_1925.xyz id type x y z
+run 50000
+write_restart 1925K.restart
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1925K，NPT平衡0.5ns
+fix 1 all npt temp 1925 1925 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1925_1925.xyz id type x y z
+run 500000
+unfix 1
+undump 1
+
+# 1925K，Müller-Plathe反向非平衡分子动力学粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1925 1925 0.1
+fix_modify fxnvt temp mytemp
+
+# 每1步交换一次x方向动量，动量沿z方向传递；z方向划分为20层
+fix MP_v all viscosity 1 x z 20
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1925K.txt
+
+# 前200000步建立稳定速度梯度
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx
+thermo_modify temp mytemp
+run 200000
+unfix MP_v
+
+# 后200000步采集动量通量并计算粘度，单位为Pa·s
+fix MP_v all viscosity 1 x z 20
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run 200000
+
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 1925-1900K,500K/ns
+fix 1 all npt temp 1925 1900 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol 
+dump 1 all custom 1000 trajectory/cool_1925_1900.xyz id type x y z 
+run 50000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1900K,0.5ns
+fix 1 all npt temp 1900 1900 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1900_1900.xyz id type x y z 
+run 500000
+unfix 1
+undump 1
+
+# 1900K,粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1900 1900 0.1
+fix_modify fxnvt temp mytemp #速度变化对温度有影响，排除流体自身的速度后计算温度
+
+# 通过与动量通量成比例的应力张量的非对角分量来测量响应
+fix MP_v all viscosity 1 x z 20 #每1步交换一次x方向的动量，动量传递方向是z方向
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced      #在z方向分20（1/0.05）块
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1900K.txt          #输出的是x方向速度
+
+# equilibration run 
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2 #bin11和bin1、bin20交换速度，使之产生速度梯度            
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx #输出的动量和速度梯度               
+thermo_modify temp mytemp                                
+run 200000
+unfix MP_v
+
+# data gathering run
+fix	MP_v all viscosity 1 x z 20 #每1步进行一次x方向的动量交换，z方向的动量传递为20bins
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}#对应lammps计算粘度的公式
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run	200000
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 1900-1875K,500K/ns
+fix 1 all npt temp 1900 1875 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol 
+dump 1 all custom 1000 trajectory/cool_1900_1875.xyz id type x y z 
+run 50000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1875K，0.5ns
+fix 1 all npt temp 1875 1875 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1875_1875.xyz id type x y z 
+run 500000
+unfix 1
+undump 1
+
+
+# 1875K，粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1875 1875 0.1 
+fix_modify fxnvt temp mytemp #速度变化对温度有影响，排除流体自身的速度后计算温度
+
+#通过与动量通量成比例的应力张量的非对角分量来测量响应。
+fix MP_v all viscosity 1 x z 20 #每1步交换一次x方向的动量，动量传递方向是z方向
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced      #在z方向分20（1/0.05）块
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1875K.txt          #输出的是x方向速度
+
+# equilibration run
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2 #bin11和bin1、bin20交换速度，使之产生速度梯度            
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx #输出的动量和速度梯度               
+thermo_modify temp mytemp                                
+run 200000
+unfix MP_v
+
+# data gathering run
+fix	MP_v all viscosity 1 x z 20 #每1步进行一次x方向的动量交换，z方向的动量传递为20bins
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}#对应lammps计算粘度的公式
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run	200000
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 1875-1850K,500K/ns
+fix 1 all npt temp 1875 1850 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol 
+dump 1 all custom 1000 trajectory/cool_1875_1850.xyz id type x y z 
+run 100000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1850K，0.5ns
+fix 1 all npt temp 1850 1850 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1850_1850.xyz id type x y z 
+run 500000
+unfix 1
+undump 1
+
+# 1850K，粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1850 1850 0.1 
+fix_modify fxnvt temp mytemp #速度变化对温度有影响，排除流体自身的速度后计算温度
+
+#通过与动量通量成比例的应力张量的非对角分量来测量响应。
+fix MP_v all viscosity 1 x z 20 #每1步交换一次x方向的动量，动量传递方向是z方向
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced      #在z方向分20（1/0.05）块
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1850K.txt          #输出的是x方向速度
+
+# equilibration run 
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2 #bin11和bin1、bin20交换速度，使之产生速度梯度            
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx #输出的动量和速度梯度               
+thermo_modify temp mytemp                                
+run 200000
+unfix MP_v
+
+# data gathering run
+fix	MP_v all viscosity 1 x z 20 #每1步进行一次x方向的动量交换，z方向的动量传递为20bins
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}#对应lammps计算粘度的公式
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run	200000
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+reset_timestep 0
+
+# 1850-1825K,500K/ns
+fix 1 all npt temp 1850 1825 0.1 iso 1.0 1.0 1.0
+thermo 1000
+thermo_style custom step temp etotal pe ke press vol
+dump 1 all custom 1000 trajectory/cool_1850_1825.xyz id type x y z
+run 100000
+undump 1
+unfix 1
+reset_timestep 0
+
+# 1825K，0.5ns
+fix 1 all npt temp 1825 1825 0.1 iso 1.0 1.0 1.0
+dump 1 all custom 1000 trajectory/keep_1825_1825.xyz id type x y z 
+run 500000
+unfix 1
+undump 1
+
+# 1825K，粘度计算
+reset_timestep 0
+fix fxnvt all nvt temp 1825 1825 0.1 
+fix_modify fxnvt temp mytemp #速度变化对温度有影响，排除流体自身的速度后计算温度
+
+# 通过与动量通量成比例的应力张量的非对角分量来测量响应
+fix MP_v all viscosity 1 x z 20 #每1步交换一次x方向的动量，动量传递方向是z方向
+compute layers_eta all chunk/atom bin/1d z center 0.05 units reduced      #在z方向分20（1/0.05）块
+fix ave_vx all ave/chunk 20 50 1000 layers_eta vx file MP_VX_1825K.txt          #输出的是x方向速度
+
+# equilibration run
+variable dVx equal (2*f_ave_vx[11][3]-f_ave_vx[1][3]-f_ave_vx[20][3])/2 #bin11和bin1、bin20交换速度，使之产生速度梯度            
+thermo 1000
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx #输出的动量和速度梯度               
+thermo_modify temp mytemp                                
+run 200000
+unfix MP_v
+
+# data gathering run
+fix	MP_v all viscosity 1 x z 20 #每1步进行一次x方向的动量交换，z方向的动量传递为20bins
+variable eta equal -(f_MP_v/(2*((step-200000)*${dt})*lx*ly+1.0e-10))/(v_dVx/(lz/2))*${convert_eta}#对应lammps计算粘度的公式
+thermo_style custom step temp pe ke etotal f_MP_v v_dVx v_eta
+thermo_modify temp mytemp
+run	200000
+
+# 清理最后一个温度点使用的fix与compute
+unfix fxnvt
+unfix MP_v
+unfix ave_vx
+uncompute layers_eta
+uncompute mytemp
+
+print "All viscosity calculations from 2025 K to 1825 K are completed."

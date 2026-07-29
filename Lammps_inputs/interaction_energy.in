@@ -1,0 +1,36 @@
+# ----------------- Init Section -----------------
+
+boundary p p p
+neighbor 3.0 bin
+neigh_modify every 1 delay 0 check yes
+atom_style atomic
+units metal
+pair_style meam
+
+# ----------------- Atom Definition Section -----------------
+
+read_data wet_1825.data
+
+group sub type 1
+group drop type 2 3
+
+neigh_modify exclude group sub sub
+neigh_modify exclude group drop drop
+
+# ----------------- Run Section -----------------
+
+pair_coeff * * Jelinek_2012_meamf Al Si Mg Cu Fe Jelinek_2012_meam.alsimgcufe Fe Fe Si
+
+mass 1 55.85
+mass 2 55.85
+mass 3 28.09
+
+compute 1 drop pe/atom
+compute 2 drop reduce sum c_1 fx fy fz
+
+timestep 0.001
+thermo 100
+thermo_style custom step temp c_2[*]
+thermo_modify flush yes
+
+rerun wet300_1825k.lammpstrj fist 100 last 500000 dump x y z vx vy vz

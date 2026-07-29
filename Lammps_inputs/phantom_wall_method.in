@@ -1,0 +1,113 @@
+units metal 
+neighbor 3 bin
+neigh_modify every 1 delay 0 check yes 
+atom_style atomic 
+dimension 3 
+boundary p p p 
+timestep 0.001
+read_data wet_1825.data
+reset_timestep 0 
+
+#分组
+group sub type 1 
+group drop type 2 3 
+group fe type 2
+group si type 3
+region f block INF INF INF INF INF 2 units box 
+region t block INF INF INF INF 2.1 10 units box
+group f region f 
+group t region t 
+group n subtract sub f t 
+group s_up subtract sub f 
+group system subtract all f
+
+#计算温度
+# 液滴整体内部温度，仅用于监测，不用于控温
+compute d_all drop temp/com
+compute t_t t temp/com 
+# 液滴只统计 x、y 方向温度，用于液滴横向控温，不控 z 方向
+compute d_t drop temp/partial 1 1 0
+# 基底非固定层/表面层温度
+compute n_t n temp/com
+compute n_txy n temp/partial 1 1 0
+compute n_tz  n temp/partial 0 0 1
+
+#力场
+pair_style  meam 
+pair_coeff  * * Jelinek_2012_meamf Al Si Mg Cu Fe Jelinek_2012_meam.alsimgcufe Fe Fe Si 
+
+read_dump wet300_1825k.lammpstrj 500000 x y z vx vy vz replace yes box yes 
+
+# 现在再改 z 方向边界
+change_box all boundary p p s
+
+thermo 100
+thermo_style custom step c_t_t c_d_t c_n_t 
+thermo_modify flush yes
+dump 1 all atom 100 relax.lammpstrj
+fix 1 n nve 
+fix 2 t nvt temp 300 300 0.1 
+fix_modify 2 temp t_t 
+fix 3 drop nvt temp 1825 1825 0.01  
+fix_modify 3 temp d_t 
+run 3000
+unfix 1 
+unfix 2 
+unfix 3 
+undump 1 
+reset_timestep 0 
+
+# ---------- 系综设置 ----------
+# 基底非恒温自由层：NVE
+fix 1 n nve
+fix 0 n spring/self 0.02 z
+# 基底恒温层：300 K
+fix 2 t nvt temp 300 300 0.1
+fix_modify 2 temp t_t
+
+# 液滴：高温 NVT，但只控 x、y 方向温度，不控 z 方向
+# 注意：不要再给 drop 加 nve，否则会重复积分
+fix 4 drop nvt temp 1825 1825 0.1
+fix_modify 4 temp d_t
+
+# 只去除 x、y 方向整体漂移，不去除 z 方向
+group mobile union n t drop
+fix mom mobile momentum 100 linear 1 1 0
+
+# 检查当前状态
+run 0
+
+# ---------- 定义力统计区域 ----------
+# 不建议 region 名字也叫 n，避免和 group n 混淆
+region force_zone block INF INF INF INF 18 20 units box
+
+# 液滴质心高度
+compute drop_com drop com
+variable comz equal c_drop_com[3]
+
+# 统计指定基底区域的 z 向受力
+compute slf all reduce/region force_zone sum fz
+
+# ---------- 虚拟墙设置 ----------
+# 墙从 z = 16 Å 开始，以 0.1 Å/ps 的速度向上移动
+variable z0    equal 16.0
+variable vpull equal 0.1
+variable pz    equal v_z0+v_vpull*step*dt
+
+# 虚拟墙只作用于液滴 drop
+fix 111 drop wall/lj126 zlo v_pz 0.01 3.0 3.367 units box
+
+# ---------- 输出轨迹 ----------
+dump 1 all custom 1000 PMF.XYZ id type x y z element
+dump_modify 1 element Fe Fe Si
+
+# ---------- 热力学输出 ----------
+thermo 100
+thermo_style custom step c_t_t c_d_t c_d_all c_n_t c_n_txy c_n_tz c_slf v_comz v_pz f_111 f_111[1]
+thermo_modify flush yes
+
+# ---------- 输出墙位置和墙力 ----------
+# 每 100 步输出一次前 100 步平均值
+fix output_force all ave/time 10 10 100 v_pz f_111[1] file separation_force.txt
+
+run 1000000

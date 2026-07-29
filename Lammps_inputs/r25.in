@@ -1,0 +1,43 @@
+units metal 
+boundary p p p
+atom_style atomic
+timestep 0.001
+
+#Get Pt nanoparticles
+variable A0 equal 2.86
+lattice bcc ${A0}
+region mybox block -15 15 -15 15 -15 15
+create_box 2 mybox
+region pt_nano sphere 0 0 0 25 units box 
+create_atoms 1 region pt_nano
+
+set type 1 type/ratio 2 0.0579 6372347
+mass 1 55.85
+mass 2 28.09
+
+write_data sys.data 
+
+pair_style      meam
+pair_coeff      * * Jelinek_2012_meamf Al Si Mg Cu Fe Jelinek_2012_meam.alsimgcufe Fe Si 
+
+min_style cg
+minimize 1e-15 1e-15 10000 10000
+reset_timestep 0 
+
+velocity all create 300 86346 dist gaussian
+thermo 100 
+thermo_style custom step temp pe 
+dump 1 all atom 100 relax.xyz
+fix 1 all nvt temp 300 300 0.1 
+run 20000
+unfix 1
+undump 1
+reset_timestep 0
+
+thermo 100 
+thermo_style custom step temp pe 
+dump 1 all atom 100 melt.xyz
+fix 1 all nvt temp 300 2000 0.1 
+run 1700000
+
+

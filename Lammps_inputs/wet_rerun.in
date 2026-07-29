@@ -1,0 +1,53 @@
+read_restart relax300_1825.restart
+neighbor 3 bin
+neigh_modify every 20 delay 0 check yes 
+timestep 0.001
+change_box all boundary p p p 
+
+pair_style  meam 
+pair_coeff      * * Jelinek_2012_meamf Al Si Mg Cu Fe Jelinek_2012_meam.alsimgcufe Fe Fe Si 
+
+reset_timestep 0
+
+group fe type 2
+group si type 3
+#计算温度
+compute d_t drop temp/com
+compute t_t t temp/com 
+compute n_t n temp/com 
+#计算基底温度分布云图
+compute t all ave/sphere/atom
+
+
+#润湿模拟
+variable       zmin equal bound(drop,zmin)
+variable       zmax equal bound(sub,zmax)
+variable       x equal xcm(drop,x)
+variable       y equal xcm(drop,y)
+variable       distz equal "-((v_zmin-v_zmax)-4)"
+displace_atoms drop move 0 0 v_distz units box
+
+write_data wet_1825.data
+
+
+#计算润湿过程中液滴MSD随时间的变化
+compute msd_drop drop msd com yes
+fix msd_out all ave/time 1 100 100 c_msd_drop[1] c_msd_drop[2] c_msd_drop[3] c_msd_drop[4] file msd_drop.dat
+
+#计算任务
+variable z equal xcm(drop,z) #计算液滴在润湿过程中质心高度变化
+fix out_force all ave/time 1 100 100 v_z file wetting_z.dat
+
+thermo 100 
+thermo_style custom step temp press pe ke etotal c_d_t c_t_t c_n_t 
+thermo_modify flush yes 
+dump 1 all custom 100 wet300_1825k.lammpstrj id type x y z vx vy vz c_t[2]
+#fix 0 all momentum 1 linear 1 1 1 rescale
+fix 1 n nve 
+fix 2 t nvt temp 300 300 0.1 
+fix_modify 2 temp t_t 
+fix 3 drop nvt temp 1825 1825 0.1  
+fix_modify 3 temp d_t 
+run 1000000
+write_restart 1ns.restart
+write_data sys1ns.data 
